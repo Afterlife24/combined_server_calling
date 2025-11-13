@@ -8,19 +8,26 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// ---------- Hardcoded MongoDB Connection ----------
-const MONGO_URI =
-  "mongodb+srv://financials:financials@financials.6f1amos.mongodb.net/?retryWrites=true&w=majority&appName=Financials";
+// ---------- MongoDB Connections for Two Different Clusters ----------
+const BHAWARCHI_MONGO_URI = "mongodb+srv://bhawarchi:bhawarchi2024@alcohal.u1bov.mongodb.net/?appName=alcohal";
+const BANSARI_MONGO_URI = "mongodb+srv://financials:financials@financials.6f1amos.mongodb.net/?retryWrites=true&w=majority&appName=Financials";
 const PORT = 5000;
 
-let client;
+let bhawrachiClient;
+let bansariClient;
 let dbConnections = {}; // cache per database
 
 async function connectDB() {
   try {
-    client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
-    await client.connect();
-    console.log("✅ MongoDB connected successfully");
+    // Connect to Bhawarchi cluster
+    bhawrachiClient = new MongoClient(BHAWARCHI_MONGO_URI, { serverSelectionTimeoutMS: 5000 });
+    await bhawrachiClient.connect();
+    console.log("✅ Bhawarchi MongoDB cluster connected successfully");
+
+    // Connect to Bansari cluster
+    bansariClient = new MongoClient(BANSARI_MONGO_URI, { serverSelectionTimeoutMS: 5000 });
+    await bansariClient.connect();
+    console.log("✅ Bansari MongoDB cluster connected successfully");
   } catch (err) {
     console.error("❌ MongoDB connection failed:", err);
     process.exit(1);
@@ -28,18 +35,26 @@ async function connectDB() {
 }
 
 function getDB(restaurantName) {
-  // Map frontend selection to specific database names
+  // Map frontend selection to specific cluster and database
+  let client;
   let dbName;
+  
   if (restaurantName.toLowerCase() === "bhawarchi") {
+    client = bhawrachiClient;
     dbName = "bhawarchi";
+    console.log(`🔗 Routing to Bhawarchi cluster, database: ${dbName}`);
   } else {
-    dbName = "Bansari_Restaurant"; // default
+    client = bansariClient;
+    dbName = "Bansari_Restaurant";
+    console.log(`🔗 Routing to Bansari cluster, database: ${dbName}`);
   }
 
-  if (!dbConnections[dbName]) {
-    dbConnections[dbName] = client.db(dbName);
+  const cacheKey = `${restaurantName}_${dbName}`;
+  if (!dbConnections[cacheKey]) {
+    dbConnections[cacheKey] = client.db(dbName);
+    console.log(`✨ Created new DB connection for ${cacheKey}`);
   }
-  return dbConnections[dbName];
+  return dbConnections[cacheKey];
 }
 
 connectDB();
@@ -59,12 +74,14 @@ function getCollections(restaurant) {
 app.get("/api/orders", async (req, res) => {
   try {
     const restaurant = req.query.restaurant || "bansari";
+    console.log(`📦 Fetching orders for restaurant: ${restaurant}`);
     const { ordersCollection } = getCollections(restaurant);
     const orders = await ordersCollection.find({}, { projection: { _id: 0 } }).toArray();
+    console.log(`📊 Found ${orders.length} orders for ${restaurant}`);
     res.json(orders);
   } catch (error) {
-    console.error("❌ Error fetching orders:", error);
-    res.status(500).json({ error: "Failed to fetch orders" });
+    console.error(`❌ Error fetching orders for ${restaurant}:`, error);
+    res.status(500).json({ error: "Failed to fetch orders", details: error.message });
   }
 });
 
@@ -85,6 +102,7 @@ app.get("/api/reservations", async (req, res) => {
 app.get("/api/stats", async (req, res) => {
   try {
     const restaurant = req.query.restaurant || "bansari";
+    console.log(`📊 Fetching stats for restaurant: ${restaurant}`);
     const { ordersCollection } = getCollections(restaurant);
 
     const totalOrders = await ordersCollection.countDocuments({});
@@ -101,6 +119,8 @@ app.get("/api/stats", async (req, res) => {
       return acc + orderTotal;
     }, 0);
 
+    console.log(`📈 Stats for ${restaurant}: ${totalOrders} total orders, revenue: ${revenue}`);
+
     res.json({
       restaurant,
       total_orders: totalOrders,
@@ -109,8 +129,8 @@ app.get("/api/stats", async (req, res) => {
       revenue,
     });
   } catch (error) {
-    console.error("❌ Error fetching stats:", error);
-    res.status(500).json({ error: "Failed to fetch stats" });
+    console.error(`❌ Error fetching stats for ${restaurant}:`, error);
+    res.status(500).json({ error: "Failed to fetch stats", details: error.message });
   }
 });
 
@@ -164,6 +184,33 @@ app.get("/api/orders/:phone", async (req, res) => {
   } catch (error) {
     console.error("❌ Error fetching order:", error);
     res.status(500).json({ error: "Failed to fetch order" });
+  }
+});
+
+// ✅ Debug endpoint to check cluster info
+app.get("/api/debug/cluster-info", async (req, res) => {
+  try {
+    const restaurant = req.query.restaurant || "bansari";
+    const client = restaurant.toLowerCase() === "bhawarchi" ? bhawrachiClient : bansariClient;
+    
+    // List all databases
+    const adminDb = client.db().admin();
+    const dbList = await adminDb.listDatabases();
+    
+    // Get collections for the specific database
+    const db = getDB(restaurant);
+    const collections = await db.listCollections().toArray();
+    
+    res.json({
+      restaurant,
+      cluster: restaurant.toLowerCase() === "bhawarchi" ? "Bhawarchi (alcohal)" : "Bansari (financials)",
+      databases: dbList.databases.map(d => d.name),
+      current_database: restaurant.toLowerCase() === "bhawarchi" ? "bhawarchi" : "Bansari_Restaurant",
+      collections: collections.map(c => c.name)
+    });
+  } catch (error) {
+    console.error("❌ Error fetching cluster info:", error);
+    res.status(500).json({ error: "Failed to fetch cluster info", details: error.message });
   }
 });
 
